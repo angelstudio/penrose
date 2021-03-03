@@ -1,185 +1,128 @@
 version: 2.1
-orbs:
-  aws-ecr: circleci/aws-ecr@3.0.0
-  aws-ecs: circleci/aws-ecs@0.0.6
 jobs:
-  build_frontend:
+  docs-deploy:
     docker:
-      - image: circleci/node:11.10.1
+      - image: circleci/node:12.19.0
+    working_directory: ~/penrose/packages/core
     steps:
       - checkout:
           path: ~/penrose
-      - restore_cache:
-          key: dependency-cache-{{ checksum "~/penrose/react-renderer/package.json" }}-{{ arch }}
       - run:
-          name: Install npm deps
-          command: npm install
-          working_directory: ~/penrose/react-renderer
-      - save_cache:
-          key: dependency-cache-{{ checksum "~/penrose/react-renderer/package.json" }}-{{ arch }}
-          paths:
-            - ~/penrose/react-renderer/node_modules
+          name: Install deps
+          command: |
+            sudo npm install -g --silent gh-pages
+            yarn
+            git config user.email "ci-build@penrose.ink"
+            git config user.name "ci-build"
+      - add_ssh_keys:
+          fingerprints:
+            - "e0:22:08:03:8f:eb:1c:b7:59:4e:48:00:6d:2d:a7:be"
       - run:
-          name: Build normally
-          command: npm run build
-          working_directory: ~/penrose/react-renderer
+          name: Generate docs
+          command: yarn docs
       - run:
-          name: Build-lib
-          command: npm run build-lib
-          working_directory: ~/penrose/react-renderer
-      - store_artifacts:
-          path: ~/penrose/react-renderer/build
-          destination: react-renderer-built
+          name: Add nojekyll
+          command: touch docs/.nojekyll
+      - run:
+          name: Deploy to gh-pages
+          command: gh-pages --dotfiles --message "[skip ci] Updates" --dist docs/
   build:
     docker:
-      - image: fpco/stack-build:lts-13.24
-    #    parallelism: 4
+      - image: circleci/node:12.19.0
     steps:
-      - checkout
-      - restore_cache:
-          # Read about caching dependencies: https://circleci.com/docs/2.0/caching/
-          name: Restore Cached Dependencies
-          keys:
-            - penrose-cache-{{ checksum "penrose.cabal" }}
-      - run:
-          name: Manually install Alex and Happy
-          command: stack install alex happy
-      - run:
-          name: Resolve/Update Dependencies
-          command: stack build
-      - run:
-          name: Run tests
-          command: stack test
-      - run:
-          name: Install executable
-          command: stack install
-      - save_cache:
-          name: Cache Dependencies
-          key: penrose-cache-{{ checksum "penrose.cabal" }}
-          paths:
-            - ".stack"
-            - ".stack-work"
-            - "$HOME/.ghc"
-            - "$HOME/.cabal"
-            - "$HOME/.stack"
-            - "/root/.stack"
-            - "/root/.stack-work"
-
-      - store_artifacts:
-          # Upload test summary for display in Artifacts: https://circleci.com/docs/2.0/artifacts/
-          path: ~/.local/bin/penrose
-          destination: penrose-bin
-      - persist_to_workspace:
-          root: ~/.local/bin
-          paths:
-            - penrose
-      # - persist_to_workspace:
-      #     root: .
-      #     paths:
-      #       - src/
-  headless_test:
-    docker:
-      - image: fpco/stack-build:lts-13.24
-    steps:
-      - run:
-          name: Add node repo
-          command: curl -sL https://deb.nodesource.com/setup_12.x | sudo -E bash -
-      - run:
-          name: Install nodejs/npm
-          command: sudo apt-get update && sudo apt-get install -y nodejs
       - checkout:
           path: ~/penrose
-      - attach_workspace:
-          at: ~/.local/bin
       - restore_cache:
-          key: dependency-cache-{{ checksum "~/penrose/react-renderer/package.json" }}-{{ checksum "~/penrose/automator/package.json" }}
+          key: dependency-cache-{{ checksum "~/penrose/package.json" }}-{{ arch }}
       - run:
-          name: Install deps for react-renderer
-          command: npm install
-          working_directory: ~/penrose/react-renderer
-      - run:
-          name: Install deps for automator
-          command: npm install
-          working_directory: ~/penrose/automator
+          name: Install deps
+          command: sudo yarn
+          working_directory: ~/penrose
       - save_cache:
-          key: dependency-cache-{{ checksum "~/penrose/react-renderer/package.json" }}-{{ checksum "~/penrose/automator/package.json" }}
+          key: dependency-cache-{{ checksum "~/penrose/package.json" }}-{{ arch }}
           paths:
-            - ~/penrose/react-renderer/node_modules
-            - ~/penrose/automator/node_modules
+            - ~/penrose/node_modules
       - run:
-          name: Make output dir
-          command: mkdir -p /root/out
-          working_directory: ~/
+          name: Run all builds
+          command: sudo yarn build
+          working_directory: ~/penrose/
       - run:
-          name: Alias penrose command
-          command: echo 'alias penrose=~/.local/bin/penrose' >> ~/.bashrc && source ~/.bashrc
-          working_directory: ~/
+          name: Run all tests
+          command: sudo yarn test
+          working_directory: ~/penrose/
       - run:
-          name: Run all in registry
-          command: npm start -- batch substanceLibrary.json styleLibrary.json elementLibrary.json /root/out
-          working_directory: ~/penrose/automator
+          name: Make test report dir
+          command: mkdir -p reports/junit
+          working_directory: ~/penrose/packages/core
+      - run:
+          name: Run core tests and generate test data
+          command: sudo yarn coverage --ci --runInBand --reporters=default --reporters=jest-junit
+          working_directory: ~/penrose/packages/core
+      - run:
+          name: Move test report
+          command: mv junit.xml reports/junit/
+          working_directory: ~/penrose/packages/core
+      - run:
+          name: Upload test coverage to codecov
+          command: bash <(curl -s https://codecov.io/bash)
+          working_directory: ~/penrose/packages/core
+      - store_test_results:
+          path: ~/penrose/packages/core/reports/junit/
       - store_artifacts:
-          path: ~/out
-          destination: output
-
+          path: ~/penrose/packages/core/reports/junit/
+      - store_artifacts: # for display in Artifacts: https://circleci.com/docs/2.0/artifacts/
+          path: ~/penrose/packages/core/coverage
+      # - store_artifacts:
+      #     path: ~/penrose/penrose-web/build
+      #     destination: penrose-web-built
+  canary_release:
+    docker:
+      - image: circleci/node:12.19.0
+    steps:
+      - checkout:
+          path: ~/penrose
+      - restore_cache:
+          key: dependency-cache-{{ checksum "~/penrose/package.json" }}-{{ arch }}
+      - run:
+          name: Install deps
+          command: sudo yarn
+          working_directory: ~/penrose
+      - save_cache:
+          key: dependency-cache-{{ checksum "~/penrose/package.json" }}-{{ arch }}
+          paths:
+            - ~/penrose/node_modules
+      - run:
+          name: Run all builds
+          command: sudo yarn build
+          working_directory: ~/penrose/
+      - run:
+          name: Authenticate with registry
+          command: echo "//registry.npmjs.org/:_authToken=$NPM_TOKEN" > ~/penrose/.npmrc
+      - run:
+          name: Publish canary release
+          command: sudo yarn publish:canary --yes
+          working_directory: ~/penrose/
 workflows:
   version: 2.1
   build_other_branches:
     jobs:
-      - build_frontend:
-          filters:
-            branches:
-              ignore:
-                - master
       - build:
           filters:
             branches:
               ignore:
-                - master
-      - headless_test:
-          requires:
-            - build
-          filters:
-            branches:
-              ignore:
-                - master
-  build_master_deploy:
+                - main
+
+  build_main_deploy:
     jobs:
-      - build_frontend:
+      - docs-deploy:
           filters:
             branches:
-              only: master
+              only: main
       - build:
           filters:
             branches:
-              only: master
-      - headless_test:
-          requires:
-            - build
+              only: main
+      - canary_release:
           filters:
             branches:
-              only: master
-      - aws-ecr/build_and_push_image:
-          filters:
-            branches:
-              only: master
-          requires:
-            - build
-          account-url: AWS_ECR_ACCOUNT_URL
-          aws-access-key-id: AWS_ACCESS_KEY
-          aws-secret-access-key: AWS_SECRET_ACCESS_KEY
-          region: AWS_REGION
-          repo: penrose
-          dockerfile: Dockerfile.circleci
-          attach-workspace: true
-#       - aws-ecs/deploy-service-update:
-#           requires:
-#             - aws-ecr/build_and_push_image
-#           family: penrose-service
-#           cluster-name: penrose-cluster
-#           aws-access-key-id: $AWS_ACCESS_KEY
-#           aws-secret-access-key: $AWS_SECRET_ACCESS_KEY
-#           aws-region: $AWS_REGION
-#           filters:
-#             branches:
-#               only: master
+              only: main
